@@ -11,7 +11,7 @@ import requests
 
 AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
 TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
-DEFAULT_SCOPES = "openid profile w_member_social"
+DEFAULT_SCOPES = "r_liteprofile w_member_social"
 DEFAULT_REDIRECT_URI = "https://callback-omega-one.vercel.app/callback/linkedin"
 DEFAULT_TOKEN_FILE = "~/.linkedin/oauth2_token.json"
 

@@ -38,6 +38,12 @@ Generate a user access token manually:
 python oauth2_login.py --client-id "$LINKEDIN_CLIENT_ID"
 ```
 
+Default scopes requested by the login helper:
+
+```text
+r_liteprofile w_member_social
+```
+
 By default token JSON is stored at `~/.linkedin/oauth2_token.json`, which `main.py` reads automatically.
 If no valid token is found when posting, `main.py` auto-starts this login flow.
 
@@ -57,16 +63,16 @@ Post directly:
 python main.py "hello, world"
 ```
 
-Post with image media:
+Post with media:
 
 ```bash
-python main.py "hello, world" /path/to/image.jpg
+python main.py "hello, world" /path/to/image-or-video
 ```
 
 or:
 
 ```bash
-python main.py "hello, world" --media /path/to/image.jpg
+python main.py "hello, world" --media /path/to/image-or-video
 ```
 
 Compose in Vim:
@@ -77,13 +83,14 @@ python main.py -e
 
 ## Media Notes
 
-- This CLI currently supports image attachment uploads for LinkedIn posts.
-- Videos/GIFs are not implemented yet in this project.
+- Supported media: image and video uploads for LinkedIn posts.
+- Supported file types: JPG, JPEG, PNG, WEBP, GIF, MP4, MOV.
+- The CLI waits for LinkedIn asset processing before creating the post.
 
 ## CLI Flags
 
 - `-e`, `--edit`: Open Vim to compose a post.
-- `-m`, `--media`: Attach an image from a local file path.
+- `-m`, `--media`: Attach an image or video from a local file path.
 - `-v`, `--version`: Print version and exit.
 - `-u`, `--upgrade`: Upgrade via the installer script.
 - `-h`, `--help`: Show help.

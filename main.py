@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -142,13 +143,16 @@ def _detect_media_type(path):
         ".png": "image/png",
         ".webp": "image/webp",
         ".gif": "image/gif",
+        ".mp4": "video/mp4",
+        ".mov": "video/quicktime",
+        ".m4v": "video/mp4",
     }
     media_type = fallback_types.get(extension)
     if media_type:
         return media_type
 
     raise RuntimeError(
-        f"Unsupported media type for '{path}'. LinkedIn media upload currently supports images here."
+        f"Unsupported media type for '{path}'. Supported types: JPG, JPEG, PNG, WEBP, GIF, MP4, MOV."
     )
 
 
@@ -179,10 +183,19 @@ def _owner_urn(access_token):
     return f"urn:li:person:{member_id.strip()}"
 
 
-def _register_image_upload(access_token, owner_urn):
+def _media_recipe_for_type(media_type):
+    if media_type.startswith("image/"):
+        return "urn:li:digitalmediaRecipe:feedshare-image", "IMAGE"
+    if media_type.startswith("video/"):
+        return "urn:li:digitalmediaRecipe:feedshare-video", "VIDEO"
+    raise RuntimeError(f"Unsupported media type '{media_type}'")
+
+
+def _register_upload(access_token, owner_urn, media_type):
+    recipe, _ = _media_recipe_for_type(media_type)
     body = {
         "registerUploadRequest": {
-            "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
+            "recipes": [recipe],
             "owner": owner_urn,
             "serviceRelationships": [
                 {
@@ -214,18 +227,92 @@ def _register_image_upload(access_token, owner_urn):
     return upload_url, asset
 
 
-def _upload_image_binary(upload_url, media_path, media_type, access_token):
+def _extract_recipe_status(payload):
+    if not isinstance(payload, dict):
+        return None
+    recipes = payload.get("recipes")
+    if isinstance(recipes, list):
+        for recipe in recipes:
+            if isinstance(recipe, dict):
+                status = recipe.get("status")
+                if isinstance(status, str) and status.strip():
+                    return status.strip().upper()
+    status = payload.get("status")
+    if isinstance(status, dict):
+        value = status.get("status")
+        if isinstance(value, str) and value.strip():
+            return value.strip().upper()
+    if isinstance(status, str) and status.strip():
+        return status.strip().upper()
+    return None
+
+
+def _asset_id_variants(asset):
+    value = (asset or "").strip()
+    if not value:
+        return []
+    variants = [value]
+    if value.startswith("urn:li:digitalmediaAsset:"):
+        variants.append(value.rsplit(":", 1)[-1])
+    return variants
+
+
+def _wait_for_asset_ready(access_token, asset, timeout=180):
+    headers = _api_headers(access_token, json_content=False)
+    start = time.time()
+    asset_variants = _asset_id_variants(asset)
+    if not asset_variants:
+        raise RuntimeError("Missing LinkedIn asset id for status polling.")
+
+    while True:
+        payload = {}
+        last_error = None
+        for candidate in asset_variants:
+            encoded_asset = urllib.parse.quote(candidate, safe="")
+            response = _request_with_retries(
+                "GET",
+                f"{LINKEDIN_ASSETS_API}/{encoded_asset}",
+                headers=headers,
+                params={"projection": "(recipes,status)"},
+            )
+            if 200 <= response.status_code < 300:
+                payload = response.json() if response.text.strip() else {}
+                last_error = None
+                break
+            last_error = response
+
+        if last_error is not None:
+            _raise_for_linkedin_error(last_error)
+
+        status = _extract_recipe_status(payload)
+        if status == "AVAILABLE":
+            return
+        if status in {"INCOMPLETE", "FAILED"}:
+            raise RuntimeError(f"LinkedIn asset processing failed with status: {status}")
+        if time.time() - start > timeout:
+            raise RuntimeError(
+                "Timed out waiting for LinkedIn media processing to complete."
+            )
+        time.sleep(3)
+
+
+def _upload_binary(upload_url, media_path, media_type, access_token, include_auth):
     with open(media_path, "rb") as handle:
         data = handle.read()
 
     headers = {"Content-Type": media_type}
-    # Try signed upload URL first without auth header.
+    if include_auth:
+        headers["Authorization"] = f"Bearer {access_token}"
+
     response = _request_with_retries("PUT", upload_url, headers=headers, data=data)
     if 200 <= response.status_code < 300:
         return
 
-    # Some environments require bearer auth on upload call.
-    headers["Authorization"] = f"Bearer {access_token}"
+    # Some upload URLs reject auth headers while others require them; retry toggled.
+    if include_auth:
+        headers.pop("Authorization", None)
+    else:
+        headers["Authorization"] = f"Bearer {access_token}"
     response = _request_with_retries("PUT", upload_url, headers=headers, data=data)
     _raise_for_linkedin_error(response)
 
@@ -236,25 +323,30 @@ def upload_media(access_token, owner_urn, media_path):
         raise RuntimeError(f"Media file not found: {media_path}")
 
     media_type = _detect_media_type(media_path)
-    if not media_type.startswith("image/"):
-        raise RuntimeError("Only image uploads are currently supported for LinkedIn posts.")
+    _, media_category = _media_recipe_for_type(media_type)
 
-    upload_url, asset = _register_image_upload(access_token, owner_urn)
-    _upload_image_binary(upload_url, media_path, media_type, access_token)
-    return asset
+    upload_url, asset = _register_upload(access_token, owner_urn, media_type)
+    # LinkedIn docs recommend no auth header for video upload URLs.
+    include_auth = media_category != "VIDEO"
+    _upload_binary(upload_url, media_path, media_type, access_token, include_auth=include_auth)
+    _wait_for_asset_ready(access_token, asset)
+    return asset, media_category
 
 
-def post_linkedin(access_token, text, owner_urn, media_asset=None):
+def post_linkedin(access_token, text, owner_urn, media_asset=None, media_category=None):
     share_content = {
         "shareCommentary": {"text": text},
-        "shareMediaCategory": "NONE" if media_asset is None else "IMAGE",
+        "shareMediaCategory": "NONE" if media_asset is None else (media_category or "IMAGE"),
     }
     if media_asset is not None:
+        media_item = {
+            "status": "READY",
+            "media": media_asset,
+        }
+        if media_category == "VIDEO":
+            media_item["title"] = {"text": "Video"}
         share_content["media"] = [
-            {
-                "status": "READY",
-                "media": media_asset,
-            }
+            media_item
         ]
 
     payload = {
@@ -303,7 +395,7 @@ def build_parser():
     parser.add_argument(
         "-m",
         "--media",
-        help="Path to an image to attach.",
+        help="Path to an image or video to attach.",
     )
     parser.add_argument(
         "-e",
@@ -506,10 +598,17 @@ def main():
 
     owner_urn = _owner_urn(access_token)
     media_asset = None
+    media_category = None
     if media_path:
-        media_asset = upload_media(access_token, owner_urn, media_path)
+        media_asset, media_category = upload_media(access_token, owner_urn, media_path)
 
-    post_id = post_linkedin(access_token, text, owner_urn, media_asset=media_asset)
+    post_id = post_linkedin(
+        access_token,
+        text,
+        owner_urn,
+        media_asset=media_asset,
+        media_category=media_category,
+    )
 
     if media_asset:
         print(f"Posted to LinkedIn with media. id={post_id}")
