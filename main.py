@@ -563,12 +563,14 @@ def main():
         rc = _run_upgrade()
         sys.exit(rc)
 
-    if args.edit and args.text:
-        raise SystemExit("Use either -e or provide text, not both.")
-
     if args.edit:
-        text = read_from_vim()
+        text_parts = list(args.text)
         media_path = args.media
+        if media_path is None and text_parts and os.path.isfile(text_parts[-1]):
+            media_path = text_parts.pop()
+        if text_parts:
+            raise SystemExit("Use either -e or provide text, not both.")
+        text = read_from_vim()
     else:
         text_parts = list(args.text)
         media_path = args.media
