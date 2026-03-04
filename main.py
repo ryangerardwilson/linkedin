@@ -335,9 +335,10 @@ def upload_media(access_token, owner_urn, media_path):
 
 def post_linkedin(access_token, text, owner_urn, media_asset=None, media_category=None):
     share_content = {
-        "shareCommentary": {"text": text},
         "shareMediaCategory": "NONE" if media_asset is None else (media_category or "IMAGE"),
     }
+    if text:
+        share_content["shareCommentary"] = {"text": text}
     if media_asset is not None:
         media_item = {
             "status": "READY",
@@ -385,36 +386,19 @@ def post_linkedin(access_token, text, owner_urn, media_asset=None, media_categor
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Post to LinkedIn from the command line."
+        description="Post to LinkedIn from the command line.",
+        add_help=False,
     )
+    parser.add_argument("-h", dest="help_flag", action="store_true", help="Show help and exit.")
     parser.add_argument(
         "text",
         nargs="*",
         help="Post text. If omitted, use -e to open Vim.",
     )
-    parser.add_argument(
-        "-m",
-        "--media",
-        help="Path to an image or video to attach.",
-    )
-    parser.add_argument(
-        "-e",
-        "--edit",
-        action="store_true",
-        help="Open Vim to compose the post.",
-    )
-    parser.add_argument(
-        "-v",
-        "--version",
-        action="store_true",
-        help="Show version and exit.",
-    )
-    parser.add_argument(
-        "-u",
-        "--upgrade",
-        action="store_true",
-        help="Upgrade to the latest version.",
-    )
+    parser.add_argument("-m", dest="media", help="Path to an image or video to attach.")
+    parser.add_argument("-e", dest="edit", action="store_true", help="Open Vim to compose the post.")
+    parser.add_argument("-v", dest="version", action="store_true", help="Show version and exit.")
+    parser.add_argument("-u", dest="upgrade", action="store_true", help="Upgrade to the latest version.")
     return parser
 
 
@@ -531,6 +515,10 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
+    if args.help_flag:
+        parser.print_help()
+        return
+
     if args.version:
         print(__version__)
         return
@@ -574,11 +562,11 @@ def main():
     else:
         text_parts = list(args.text)
         media_path = args.media
-        if media_path is None and len(text_parts) >= 2 and os.path.isfile(text_parts[-1]):
+        if media_path is None and text_parts and os.path.isfile(text_parts[-1]):
             media_path = text_parts.pop()
         text = " ".join(text_parts).strip()
 
-    if not text:
+    if not text and not media_path:
         parser.print_help()
         return
 
