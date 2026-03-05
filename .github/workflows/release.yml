@@ -61,7 +61,7 @@ jobs:
               "$PYBIN" -m pip install --only-binary=:all: -r requirements.txt
               "$PYBIN" -m pip install --only-binary=:all: pyinstaller
               echo "__version__ = \"${VERSION}\"" > _version.py
-              "$PYBIN" -m PyInstaller --clean --onedir --name linkedin main.py
+              "$PYBIN" -m PyInstaller --clean --onedir --name linkedin --add-data oauth2_login.py:. main.py
               tar -C dist -czf linkedin-linux-x64.tar.gz linkedin
             '
 

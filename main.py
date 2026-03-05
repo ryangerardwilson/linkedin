@@ -25,6 +25,7 @@ LINKEDIN_USERINFO_API = "https://api.linkedin.com/v2/userinfo"
 LINKEDIN_ME_API = "https://api.linkedin.com/v2/me"
 LINKEDIN_UGC_POST_API = "https://api.linkedin.com/v2/ugcPosts"
 LINKEDIN_ASSETS_API = "https://api.linkedin.com/v2/assets"
+LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
@@ -37,26 +38,33 @@ def get_env(name, fallback_name=None):
     return None
 
 
-def get_user_access_token():
-    env_token = (
-        get_env("LINKEDIN_USER_ACCESS_TOKEN")
-        or get_env("LINKEDIN_ACCESS_TOKEN")
-        or get_env("LINKEDIN_BEARER_TOKEN")
-    )
-    if env_token:
-        return env_token
-
+def _oauth2_token_file_path():
     token_file = get_env("LINKEDIN_OAUTH2_TOKEN_FILE") or DEFAULT_OAUTH2_TOKEN_FILE
-    token_file = os.path.expanduser(token_file)
-    if not os.path.isfile(token_file):
-        return None
+    return os.path.expanduser(token_file)
 
+
+def _load_oauth2_token_payload():
+    token_file = _oauth2_token_file_path()
+    if not os.path.isfile(token_file):
+        return token_file, None
     try:
         with open(token_file, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, json.JSONDecodeError):
-        return None
+        return token_file, None
+    return token_file, payload if isinstance(payload, dict) else None
 
+
+def _save_oauth2_token_payload(token_file, payload):
+    token_dir = os.path.dirname(token_file)
+    if token_dir:
+        os.makedirs(token_dir, exist_ok=True)
+    with open(token_file, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def _extract_access_token(payload):
     if not isinstance(payload, dict):
         return None
 
@@ -72,6 +80,79 @@ def get_user_access_token():
     access_token = payload.get("access_token")
     if isinstance(access_token, str) and access_token.strip():
         return access_token.strip()
+    return None
+
+
+def _refresh_oauth2_access_token(token_file, payload):
+    token_obj = payload.get("token") if isinstance(payload.get("token"), dict) else {}
+    refresh_token = (
+        get_env("LINKEDIN_OAUTH2_REFRESH_TOKEN")
+        or token_obj.get("refresh_token")
+        or payload.get("refresh_token")
+    )
+    if not refresh_token:
+        return None
+
+    client_id = get_env("LINKEDIN_CLIENT_ID", "CLIENT_ID") or payload.get("client_id")
+    client_secret = (
+        get_env("LINKEDIN_CLIENT_SECRET")
+        or get_env("LINKEDIN_PRIMARY_CLIENT_SECRET")
+        or get_env("LINKEDIN_SECONDARY_CLIENT_SECRET")
+        or get_env("CLIENT_SECRET")
+    )
+    if not client_id or not client_secret:
+        return None
+
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    try:
+        response = requests.post(LINKEDIN_TOKEN_URL, headers=headers, data=data, timeout=30)
+    except requests.RequestException:
+        return None
+    if response.status_code < 200 or response.status_code >= 300:
+        return None
+
+    try:
+        refreshed = response.json()
+    except ValueError:
+        return None
+    if not isinstance(refreshed, dict):
+        return None
+
+    expires_in = int(refreshed.get("expires_in") or 0)
+    if expires_in > 0:
+        refreshed["expires_at"] = int(time.time()) + expires_in
+    if not refreshed.get("refresh_token"):
+        refreshed["refresh_token"] = refresh_token
+
+    updated_payload = dict(payload)
+    updated_payload["created_at"] = int(time.time())
+    updated_payload["token"] = refreshed
+    _save_oauth2_token_payload(token_file, updated_payload)
+    return _extract_access_token(updated_payload)
+
+
+def get_user_access_token(auto_refresh=True):
+    env_token = (
+        get_env("LINKEDIN_USER_ACCESS_TOKEN")
+        or get_env("LINKEDIN_ACCESS_TOKEN")
+        or get_env("LINKEDIN_BEARER_TOKEN")
+    )
+    if env_token:
+        return env_token
+
+    token_file, payload = _load_oauth2_token_payload()
+    access_token = _extract_access_token(payload)
+    if access_token:
+        return access_token
+    if auto_refresh and isinstance(payload, dict):
+        return _refresh_oauth2_access_token(token_file, payload)
     return None
 
 
@@ -397,6 +478,12 @@ def build_parser():
     )
     parser.add_argument("-m", dest="media", help="Path to an image or video to attach.")
     parser.add_argument("-e", dest="edit", action="store_true", help="Open Vim to compose the post.")
+    parser.add_argument(
+        "-ea",
+        dest="ensure_auth",
+        action="store_true",
+        help="Ensure OAuth2 token is valid (refresh/login if needed) and exit.",
+    )
     parser.add_argument("-v", dest="version", action="store_true", help="Show version and exit.")
     parser.add_argument("-u", dest="upgrade", action="store_true", help="Upgrade to the latest version.")
     return parser
@@ -551,6 +638,21 @@ def main():
         rc = _run_upgrade()
         sys.exit(rc)
 
+    if args.ensure_auth:
+        access_token = get_user_access_token(auto_refresh=True)
+        if not access_token:
+            print(
+                "No valid LinkedIn OAuth2 token found. Starting browser login...",
+                file=sys.stderr,
+            )
+            rc = _run_oauth2_login_helper()
+            if rc == 0:
+                access_token = get_user_access_token(auto_refresh=True)
+        if not access_token:
+            raise SystemExit("OAuth2 token check failed.")
+        print("LinkedIn OAuth2 token is ready.")
+        return
+
     if args.edit:
         text_parts = list(args.text)
         media_path = args.media
@@ -570,7 +672,7 @@ def main():
         parser.print_help()
         return
 
-    access_token = get_user_access_token()
+    access_token = get_user_access_token(auto_refresh=True)
     if not access_token:
         print(
             "No valid LinkedIn OAuth2 token found. Starting browser login...",
@@ -578,7 +680,7 @@ def main():
         )
         rc = _run_oauth2_login_helper()
         if rc == 0:
-            access_token = get_user_access_token()
+            access_token = get_user_access_token(auto_refresh=True)
 
     if not access_token:
         raise SystemExit(
